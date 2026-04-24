@@ -1,59 +1,39 @@
-# Security / Production Readiness Review
+# Security / Production notes
 
-Контекст: orchestrator опрашивает EDR, проверяет VulnDB, создаёт тикет в Target. Эмуляторы считаются “как есть” и не меняются.
+Ниже — короткие заметки по безопасности и “прод-пригодности” для этого тестового.  
+Эмуляторы EDR/VulnDB/Target не трогаю — считаем их внешними сервисами.
 
-## Итог
+## Что важно в текущей реализации
 
-Сфокусировано на:
-- минимизации привилегий контейнера
-- базовой защите панели/интеграций
-- наблюдаемости по ошибкам и латентности
-- устойчивости и корректном завершении процесса
+- **Контейнеры**: минимальные привилегии (не root), убраны лишние capabilities, включено `no-new-privileges`, добавлены healthchecks и ограничения по ресурсам.
+- **Веб-панель**: можно включить токеном (`DASHBOARD_AUTH_TOKEN`), чтобы не светить внутренние данные без необходимости.
+- **Исходящие HTTP**: есть таймауты/ретраи, плюс валидация URL по allowlist хостов (`ALLOWED_SERVICE_HOSTS`) как базовая защита от SSRF.
+- **Наблюдаемость**: Prometheus метрики не только по количествам, но и по латентности/ошибкам upstream’ов.
+- **Надёжность**: корректное завершение по SIGTERM/SIGINT; bounded in-memory state для UI (не растёт бесконечно).
 
-## Критичные риски и исправления
+## Риски, которые закрыты прямо в коде/конфиге
 
-### 1) Privilege hardening контейнера (CIS Docker)
+### Privilege hardening (Docker)
+Если процесс в контейнере будет скомпрометирован, хочется минимизировать blast radius. Поэтому:
+- non-root user в образе оркестратора
+- `cap_drop: ALL`, `no-new-privileges`
+- `read_only` FS + `tmpfs` для `/tmp`
+- CPU/RAM/PIDs лимиты, чтобы один контейнер не “съел” хост
+- `.dockerignore`, чтобы лишнее не попадало в build context
 
-**Риск**: компрометация приложения с правами root + лишние capabilities → более тяжёлые последствия.
+### SSRF через конфигурацию URL
+`EDR_URL/VULNDB_URL/TARGET_URL` берутся из env. В проде это частый источник SSRF, если окружение “потечёт”.  
+Поэтому добавлена allowlist-проверка host’ов и схемы `http/https`.
 
-**Исправление**:
-- `Dockerfile.orchestrator`: запуск не от root
-- `docker-compose.yml`: `no-new-privileges`, `cap_drop: ALL`, `read_only` + `tmpfs`, лимиты CPU/RAM/PIDs, healthcheck
-- добавлен `.dockerignore`
+### Доступ к панели/`/api/*`
+По умолчанию это демо, но для реального окружения лучше не оставлять UI и API открытыми.  
+Сейчас можно включить простую защиту Bearer-токеном.
 
-### 2) OWASP: SSRF через конфигурацию upstream URL
+## Что бы улучшал дальше (если бы это был прод)
 
-**Риск**: если окружение/конфиг будет подменён, orchestrator может ходить на внутренние адреса/metadata сервисы.
-
-**Исправление**:
-- allowlist хостов `ALLOWED_SERVICE_HOSTS`
-- валидация `EDR_URL/VULNDB_URL/TARGET_URL` по схеме и hostname
-
-### 3) Broken Access Control: открытая панель/`/api/*`
-
-**Риск**: утечка внутренней информации и упрощение разведки.
-
-**Исправление**:
-- опциональный Bearer token через `DASHBOARD_AUTH_TOKEN` (если задан — 401 без токена)
-
-## Надёжность / отказоустойчивость
-
-- timeouts и retries на исходящих HTTP
-- метрики ошибок по каждому upstream
-- graceful shutdown по SIGTERM/SIGINT
-- bounded state для панели (`deque(maxlen=200)`)
-
-## Наблюдаемость
-
-- JSON-structured logging
-- Prometheus:
-  - counters: обработанные алерты, созданные тикеты, ошибки исходящих HTTP
-  - histograms: длительность цикла, латентность запросов к upstream
-
-## Что бы сделал дальше (если это production)
-
-- вынести web в WSGI (gunicorn) и отделить poller/worker (2 процесса/контейнера)
-- добавить очередь/буфер (RabbitMQ/Kafka/Redis Streams) + идемпотентность тикетов/дедуп по `event_id`
-- TLS/mTLS между сервисами, секреты через Vault/KMS, RBAC и network policies
-- CI: SAST (Bandit), SCA (pip-audit/OSV), container scan (Trivy), lint/format + supply-chain контроль
+- разделить web и poller (WSGI + отдельный воркер/процесс), чтобы dev server Flask не был частью “продовой” схемы
+- добавить дедуп/идемпотентность по `event_id` (и желательно shared-state типа Redis при горизонтальном скейле)
+- добавить очередь между Extract→Transform/Load, чтобы выдерживать пики и не терять события
+- TLS/mTLS между сервисами, секреты через Vault/KMS
+- CI: `pip-audit`/OSV для зависимостей + Trivy для контейнера + базовый SAST (Bandit)
 
