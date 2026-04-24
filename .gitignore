@@ -1,0 +1,27 @@
+__pycache__/
+*.py[cod]
+*$py.class
+
+.venv/
+venv/
+env/
+
+.env
+.env.*
+
+*.log
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+dist/
+build/
+
+# OS / IDE
+.DS_Store
+.idea/
+.vscode/
+
+# Optional local artifacts
+agent-transcripts/
+terminals/

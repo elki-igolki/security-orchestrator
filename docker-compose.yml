@@ -1,0 +1,131 @@
+version: '3.8'
+
+services:
+  edr:
+    image: python:3.11-slim
+    container_name: edr-emulator
+    working_dir: /app
+    volumes:
+      - ./edr_emulator.py:/app/edr_emulator.py
+      - ./requirements.txt:/app/requirements.txt
+    command: sh -c "pip install -r requirements.txt && python edr_emulator.py"
+    ports:
+      - "5001:5001"
+    networks:
+      - demo-net
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:5001/events', timeout=2).read(); print('ok')\""]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 15s
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    pids_limit: 200
+    mem_limit: 256m
+    cpus: 0.50
+
+  vulndb:
+    image: python:3.11-slim
+    container_name: vulndb-emulator
+    working_dir: /app
+    volumes:
+      - ./vulndb_emulator.py:/app/vulndb_emulator.py
+      - ./requirements.txt:/app/requirements.txt
+    command: sh -c "pip install -r requirements.txt && python vulndb_emulator.py"
+    ports:
+      - "5002:5002"
+    networks:
+      - demo-net
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import json, urllib.request; req=urllib.request.Request('http://127.0.0.1:5002/check', data=json.dumps({'process_name':'nginx.exe','process_version':'1.20.0'}).encode('utf-8'), headers={'Content-Type':'application/json'}, method='POST'); urllib.request.urlopen(req, timeout=2).read(); print('ok')\""]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 15s
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    pids_limit: 200
+    mem_limit: 256m
+    cpus: 0.50
+
+  target:
+    image: python:3.11-slim
+    container_name: target-emulator
+    working_dir: /app
+    volumes:
+      - ./target_emulator.py:/app/target_emulator.py
+      - ./requirements.txt:/app/requirements.txt
+    command: sh -c "pip install -r requirements.txt && python target_emulator.py"
+    ports:
+      - "5003:5003"
+    networks:
+      - demo-net
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import json, urllib.request; req=urllib.request.Request('http://127.0.0.1:5003/ticket', data=json.dumps({'event_id':'hc','process_name':'x','process_version':'0','hostname':'hc','alert_message':'hc'}).encode('utf-8'), headers={'Content-Type':'application/json'}, method='POST'); urllib.request.urlopen(req, timeout=2).read(); print('ok')\""]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 15s
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    pids_limit: 200
+    mem_limit: 256m
+    cpus: 0.50
+
+  orchestrator:
+    build:
+      context: .
+      dockerfile: Dockerfile.orchestrator
+    container_name: orchestrator
+    environment:
+      - EDR_URL=http://edr:5001
+      - VULNDB_URL=http://vulndb:5002
+      - TARGET_URL=http://target:5003
+      - POLL_INTERVAL=30
+      # Если задано, защитит веб-панель и /api/* (Bearer token)
+      # - DASHBOARD_AUTH_TOKEN=change-me
+      # Разрешённые хосты для исходящих HTTP (SSRF hardening)
+      - ALLOWED_SERVICE_HOSTS=edr,vulndb,target,localhost,127.0.0.1
+    ports:
+      - "8000:8000"
+      - "8080:8080"  # 👈 НОВЫЙ ПОРТ ДЛЯ ВЕБ-ИНТЕРФЕЙСА
+    networks:
+      - demo-net
+    depends_on:
+      edr:
+        condition: service_healthy
+      vulndb:
+        condition: service_healthy
+      target:
+        condition: service_healthy
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/healthz', timeout=2).read(); urllib.request.urlopen('http://127.0.0.1:8000/metrics', timeout=2).read(); print('ok')\""]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 20s
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=64m
+    pids_limit: 300
+    mem_limit: 512m
+    cpus: 1.00
+
+networks:
+  demo-net:
+    driver: bridge
